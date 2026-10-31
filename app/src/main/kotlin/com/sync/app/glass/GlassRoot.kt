@@ -65,6 +65,8 @@ fun GlassRoot(webView: WebView, c: GlassController) {
         val chromeAlpha by animateFloatAsState(if (dim) 0.45f else 1f, label = "chromeDim")
 
         Box(if (chromeAlpha < 0.999f) Modifier.fillMaxSize().graphicsLayer { alpha = chromeAlpha } else Modifier.fillMaxSize()) {
+            // 플레이리스트 곡 edit 타일/메뉴: 내비·미니 플레이어·검색 캡슐보다 아래 레이어 (스크롤되어 겹칠 때 크롬이 위에 온다)
+            EditGlass(s.edit, backdrop, c)
             s.nav?.let { NavGlass(it, backdrop, c) }
             s.bar?.let { BarGlass(it, backdrop, c) }
             s.search?.let { SearchGlass(it, backdrop, c) }
@@ -133,9 +135,14 @@ internal class RegionRecorder(private val c: GlassController) {
     private var cachedScroll = Float.NaN
     private var cachedPath: Path? = null
 
+    // edit 타일/메뉴는 사라질 때 페이드 아웃(~180ms) 하므로, 그 동안에는 백드롭 녹화 영역을 유지한다.
+    private var editSeen = false
+    private var lastEditRects: List<CssRect> = emptyList()
+    private var editGraceUntilNs = 0L
+
     val onDraw: ContentDrawScope.() -> Unit = {
         val st = c.state // snapshot read → redraw when the set of glass surfaces / rects changes
-        val sc = if (st.search != null) c.cssScroll(density) else 0f
+        val sc = if (st.search != null || st.edit != null || lastEditRects.isNotEmpty()) c.cssScroll(density) else 0f
         if (cachedFor !== st || cachedDensity != density || cachedScroll != sc) {
             cachedPath = buildPath(st, density, sc)
             cachedFor = st; cachedDensity = density; cachedScroll = sc
@@ -147,9 +154,20 @@ internal class RegionRecorder(private val c: GlassController) {
 
     private fun buildPath(s: GlassState, d: Float, scroll: Float): Path? {
         val pad = PAD_DP * d
+        val editRects = listOfNotNull(s.edit?.rect, s.edit?.menu?.rect)
+        if (editRects.isNotEmpty()) {
+            editSeen = true; lastEditRects = editRects
+        } else if (editSeen) {
+            editSeen = false; editGraceUntilNs = System.nanoTime() + 320_000_000L
+        }
+        val editShown = when {
+            editRects.isNotEmpty() -> editRects
+            System.nanoTime() < editGraceUntilNs -> lastEditRects
+            else -> { lastEditRects = emptyList(); emptyList<CssRect>() }
+        }.map { it.copy(y = it.y - scroll) }   // 문서 기준 → 화면 기준
         val rects = listOfNotNull(
             s.nav?.rect, s.bar?.rect, s.search?.let { it.rect.copy(y = maxOf(it.pin, it.rect.y - scroll)) }, s.ctx?.rect, s.dialog?.rect, s.confirm?.rect, s.add?.rect
-        )
+        ) + editShown
         if (rects.isEmpty()) return null
         return Path().apply {
             rects.forEach { r ->
