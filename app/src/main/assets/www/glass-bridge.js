@@ -124,6 +124,32 @@
             };
         }
 
+        /* 플레이리스트 곡 edit 상태: 곡 타일(길게 누르기) + 컨텍스트 메뉴(곡 삭제/즐겨찾기)
+           위치는 "문서 기준" 좌표(rect.top + scrollY)로 보낸다 → 네이티브가 WebView.getScrollY() 로 직접 보정(스크롤 1:1) */
+        const er = document.querySelector('#pl-track-list .pl-track.editing');
+        if (er && exposed(er)) {
+            const sy = window.scrollY || 0, rr = er.getBoundingClientRect();
+            const art = er.querySelector('.pl-track-art');
+            const ed = {
+                r: { x: rr.left, y: rr.top + sy, w: rr.width, h: rr.height },
+                art: art ? (art.currentSrc || art.getAttribute('src') || '') : '',
+                t: txt(er.querySelector('.pl-track-t')), c: txt(er.querySelector('.pl-track-c')),
+                d: txt(er.querySelector('.pl-track-dur')),
+                drag: er.classList.contains('ple-dragging') || er.classList.contains('ple-settling')
+            };
+            const me = document.querySelector('#pl-edit-menu.on');
+            if (me) {
+                const mr = me.getBoundingClientRect();
+                ed.menu = {
+                    r: { x: mr.left, y: mr.top + sy, w: me.offsetWidth, h: me.offsetHeight },
+                    items: Array.from(me.querySelectorAll('.pl-edit-item')).map(b => ({
+                        k: b.dataset.act || '', l: txt(b), on: b.classList.contains('on')
+                    }))
+                };
+            }
+            st.edit = ed;
+        }
+
         /* "플레이리스트에 추가" 컨텍스트 메뉴 */
         const ctx = $('pl-ctx-menu');
         if (ctx && ctx.classList.contains('on')) {
@@ -194,7 +220,7 @@
     }
 
     /* 레이아웃/상태에 실제 영향이 있는 변화만 반응 (재생 진행/가사 하이라이트 등은 무시 → 메인 스레드 부하 0) */
-    const OVERLAYS = '#pl-ctx-menu,#pl-dialog-overlay,#pl-confirm-overlay,#pl-add-modal-overlay';
+    const OVERLAYS = '#pl-ctx-menu,#pl-dialog-overlay,#pl-confirm-overlay,#pl-add-modal-overlay,#pl-edit-menu,.pl-track.editing';
     const HOSTS = '#mob-nav,#bar,.mob-srch-wrap';
     const mo = new MutationObserver(recs => {
         let burst = false, once = false;
@@ -247,6 +273,7 @@
     window.addEventListener('load', () => kick(500));
     syncNpLock();
     kick(1200);
+    window.__glassKick = kick;   // app.js(플레이리스트 edit 모드)가 드래그/상태 변화 시 즉시 상태 전송을 요청한다
 
     /* ── Native → DOM ── */
     function fireKey(el, key) {
@@ -291,6 +318,7 @@
                     }
                     break;
                 }
+                case 'pledit': if (typeof plEditAct === 'function') plEditAct(c.a); break;
                 case 'dlg': if (c.a === 'ok') plDialogConfirm(); else plDialogCancel(); break;
                 case 'cfm': if (c.a === 'ok') plConfirmOk(); else plConfirmCancel(); break;
                 case 'add': {
