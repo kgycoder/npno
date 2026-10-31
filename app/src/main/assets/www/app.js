@@ -2500,6 +2500,7 @@ function renderQueue() {
    VIEWS / ROUTING
 ════════════════════════════════════════════ */
 function gv(v, el) {
+    plEditExit();
     document.querySelectorAll('.view').forEach(e => e.classList.remove('on'));
     document.getElementById('v-' + v)?.classList.add('on');
     document.querySelectorAll('.nb').forEach(e => e.classList.remove('on'));
@@ -2518,6 +2519,13 @@ function gv(v, el) {
 const PL = {
     lists: JSON.parse(localStorage.getItem('xw_pl') || '[]'),
     curId: null
+};
+
+/* 플레이리스트 곡 edit 모드 상태 (구현은 아래 "PLAYLIST TRACK EDIT MODE" 참고) */
+const PLE = {
+    on: false, id: null, plId: null,   // edit 중인 곡 / 플레이리스트
+    drag: null, menu: null, lp: null,  // 드래그 세션 / 컨텍스트 메뉴 요소 / 롱프레스 타이머
+    swallow: false, busy: false, touchAt: 0
 };
 
 const LOCAL_PL_ID = '__local_music__';
@@ -2621,6 +2629,7 @@ function plAddTrack(plId, track) {
 
 function plRemoveTrack(plId, trackId) {
     const pl = plById(plId); if (!pl) return;
+    if (PLE.on && PLE.id === trackId) plEditExit();
     pl.tracks = pl.tracks.filter(t => t.id !== trackId);
     plSave(); plRenderDetail(plId);
 }
@@ -2664,6 +2673,8 @@ function plRenderGrid() {
 
 function plRenderDetail(plId) {
     const pl = plById(plId); if (!pl) return;
+    if (PLE.drag) _pleAbortDrag();
+    if (PLE.on && (PLE.plId !== plId || !pl.tracks.some(t => t.id === PLE.id))) plEditExit();
     PL.curId = plId;
     document.getElementById('pl-list-view').style.display = 'none';
     document.getElementById('pl-detail-view').style.display = '';
@@ -2687,7 +2698,8 @@ function plRenderDetail(plId) {
     list.innerHTML = '';
     pl.tracks.forEach((t, i) => {
         const row = document.createElement('div');
-        row.className = 'pl-track' + (S.track?.id === t.id ? ' playing' : '');
+        row.className = 'pl-track' + (S.track?.id === t.id ? ' playing' : '') + (PLE.on && PLE.id === t.id ? ' editing' : '');
+        row.dataset.id = t.id;
         row.innerHTML = `
       <span class="pl-track-num">${i + 1}</span>
       <img class="pl-track-art" src="${esc(trackThumbSrc(t))}" onerror="this.src='${esc(t.thumb || getThumbMd(t.id))}'" alt="">
@@ -2701,12 +2713,311 @@ function plRenderDetail(plId) {
           <line x1="1.5" y1="1.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="1.5" x2="1.5" y2="9.5"/>
         </svg>
       </button>`;
-        row.addEventListener('click', () => { S.q = [...pl.tracks]; S.idx = i; playTrack(t, i); });
+        row.addEventListener('click', () => {
+            // edit 진입/드래그 직후의 클릭, 또는 edit 상태에서의 탭은 재생으로 이어지지 않는다 (탭 → edit 종료)
+            if (PLE.swallow || PLE.on) return;
+            S.q = [...pl.tracks]; S.idx = i; playTrack(t, i);
+        });
         list.appendChild(row);
     });
+    if (PLE.on) { _pleBuildMenu(); _pleKick(500); }
 }
 
+/* ════════════════════════════════════════════
+   PLAYLIST TRACK EDIT MODE
+   · 곡 UI 를 길게 누르면 edit 상태 → Liquid Glass 타일(네이티브) + 컨텍스트 메뉴(곡 삭제 / 곡 즐겨찾기)
+   · edit 상태의 곡을 위/아래로 드래그하면 순서 변경. 다른 곡들은 순차적으로(stagger) 비켜나며 겹치지 않는다.
+   · 곡 목록 DOM 은 드래그 중 재배치하지 않고 transform 으로만 움직인다 → 드롭 시점에 한 번만 재렌더.
+   · 네이티브 글래스는 glass-bridge.js 가 `.pl-track.editing` / `#pl-edit-menu` 의 위치를 읽어 그린다.
+════════════════════════════════════════════ */
+const PLE_LONG_MS = 420;   // 롱프레스 판정 시간
+const PLE_SLOP = 9;        // 롱프레스 대기 중 허용 이동량(px) — 넘으면 일반 스크롤로 취급
+
+function _pleKick(ms) { try { if (window.__glassKick) window.__glassKick(ms || 600); } catch (e) { } }
+function _pleHaptic(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { } }
+function _pleRows() {
+    const list = document.getElementById('pl-track-list');
+    return list ? Array.from(list.children).filter(n => n.classList && n.classList.contains('pl-track')) : [];
+}
+function _pleRowEl(id) { return _pleRows().find(r => r.dataset.id === id) || null; }
+function _pleTrack() {
+    const pl = plById(PLE.plId);
+    return pl ? (pl.tracks.find(t => t.id === PLE.id) || null) : null;
+}
+function _pleScroller() {
+    const de = document.scrollingElement || document.documentElement;
+    if (de.scrollHeight > de.clientHeight + 1) return { get: () => de.scrollTop, by: d => { de.scrollTop += d; } };
+    const m = document.getElementById('main');
+    return { get: () => (m ? m.scrollTop : 0), by: d => { if (m) m.scrollTop += d; } };
+}
+/* 드래그/롱프레스 중에는 문서 스크롤을 잠가 제스처가 스크롤로 넘어가지 않게 한다(scrollTop 은 유지됨). 프로그램적 스크롤(자동 스크롤)은 가능. */
+function _pleLockScroll(on) { document.documentElement.classList.toggle('ple-drag', !!on); }
+
+/* ── edit 진입 / 종료 ── */
+function plEditEnter(row) {
+    const pl = plById(PL.curId); if (!pl || !row) return;
+    const id = row.dataset.id;
+    if (!pl.tracks.some(t => t.id === id)) return;
+    PLE.on = true; PLE.id = id; PLE.plId = pl.id;
+    _pleRows().forEach(r => r.classList.toggle('editing', r === row));
+    _pleBuildMenu();
+    _pleHaptic(14);
+    _pleKick(700);
+}
+function plEditExit() {
+    if (!PLE.on && !PLE.menu) return;
+    clearTimeout(PLE.lp);
+    PLE.on = false; PLE.id = null; PLE.plId = null;
+    _pleRows().forEach(r => r.classList.remove('editing'));
+    _pleDropMenu();
+    if (!PLE.drag) _pleLockScroll(false);
+    _pleKick(500);
+}
+
+/* ── 컨텍스트 메뉴 (곡 삭제 / 곡 즐겨찾기) ── */
+const _PLE_ICON_DEL = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11"/><path d="M6 4V2.5h4V4"/><path d="M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4"/><path d="M6.5 7v4"/><path d="M9.5 7v4"/></svg>`;
+const _PLE_ICON_FAV = `<svg width="16" height="16" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 12.5S2 8.8 2 5.5a3 3 0 0 1 5.5-1.65A3 3 0 0 1 13 5.5C13 8.8 7.5 12.5 7.5 12.5z"/></svg>`;
+const _PLE_MENU_W = 208, _PLE_MENU_H = 112;   // Kotlin(GlassEdit.kt) 메뉴 레이아웃과 동일 (8dp + 48dp×2 + 8dp)
+
+function _pleBuildMenu() {
+    _pleDropMenu();
+    const list = document.getElementById('pl-track-list'), t = _pleTrack();
+    if (!list || !t || PLE.drag) return;
+    const fav = isFav(t.id);
+    const m = document.createElement('div');
+    m.id = 'pl-edit-menu';
+    m.innerHTML = `
+      <button class="pl-edit-item danger" data-act="del">${_PLE_ICON_DEL}<span>곡 삭제</span></button>
+      <button class="pl-edit-item${fav ? ' on' : ''}" data-act="fav">${_PLE_ICON_FAV}<span>${fav ? '즐겨찾기 해제' : '곡 즐겨찾기'}</span></button>`;
+    m.addEventListener('click', e => {
+        const b = e.target.closest && e.target.closest('.pl-edit-item');
+        if (!b) return;
+        e.stopPropagation();
+        plEditAct(b.dataset.act);
+    });
+    list.appendChild(m);
+    PLE.menu = m;
+    _pleLayoutMenu();
+    requestAnimationFrame(() => { if (PLE.menu === m) { m.classList.add('on'); _pleKick(500); } });
+}
+function _pleDropMenu() {
+    const m = PLE.menu; PLE.menu = null;
+    if (!m) return;
+    m.classList.remove('on');
+    setTimeout(() => { if (m.parentNode) m.remove(); }, 220);
+}
+function _pleLayoutMenu() {
+    const m = PLE.menu, row = _pleRowEl(PLE.id), list = document.getElementById('pl-track-list');
+    if (!m || !row || !list) return;
+    m.style.width = _PLE_MENU_W + 'px'; m.style.height = _PLE_MENU_H + 'px';
+    m.style.left = Math.max(0, list.clientWidth - _PLE_MENU_W) + 'px';
+    let top = row.offsetTop + row.offsetHeight + 8;                 // 기본: 곡 UI 바로 아래(오른쪽 정렬)
+    const r = row.getBoundingClientRect();
+    if (r.bottom + 8 + _PLE_MENU_H > innerHeight - 150 && r.top - 8 - _PLE_MENU_H > 70) {
+        top = row.offsetTop - _PLE_MENU_H - 8;                       // 하단 내비/미니 플레이어에 가려지면 위쪽
+    }
+    m.style.top = top + 'px';
+}
+function _pleRefreshMenu() {
+    const m = PLE.menu, t = _pleTrack(); if (!m || !t) return;
+    const b = m.querySelector('[data-act="fav"]'); if (!b) return;
+    const fav = isFav(t.id);
+    b.classList.toggle('on', fav);
+    const sp = b.querySelector('span'); if (sp) sp.textContent = fav ? '즐겨찾기 해제' : '곡 즐겨찾기';
+    _pleKick(400);
+}
+
+function plEditAct(act) {
+    const t = _pleTrack(); if (!t || PLE.busy || PLE.drag) return;
+    if (act === 'fav') {
+        toggleFavTrack(t);
+        _pleRefreshMenu();
+    } else if (act === 'del') {
+        plEditDelete();
+    }
+}
+
+/* 곡 삭제: 아래 곡들이 순차적으로 위로 올라오며 빈자리를 메운 뒤 실제 삭제/재렌더 */
+function plEditDelete() {
+    const pl = plById(PLE.plId); if (!pl || PLE.busy) return;
+    const id = PLE.id;
+    const rows = _pleRows(), i = rows.findIndex(r => r.dataset.id === id);
+    if (i < 0) { plEditExit(); return; }
+    PLE.busy = true;
+    const row = rows[i];
+    const dh = row.offsetHeight;
+    plEditExit();
+    rows.forEach((r, k) => {
+        if (k < i) return;
+        r.classList.add('ple-shift');
+        if (k === i) { r.classList.add('ple-removing'); return; }
+        r.style.transitionDelay = Math.min(k - i - 1, 6) * 26 + 'ms';
+        r.style.transform = `translateY(${-dh}px)`;
+    });
+    setTimeout(() => { PLE.busy = false; plRemoveTrack(pl.id, id); }, 380);
+}
+
+/* ── 드래그로 순서 변경 ── */
+function _pleLayoutFor(d, to) {
+    // 드래그 중인 곡을 to 번째 슬롯에 넣었을 때 각 곡이 위치할 top(레이아웃 기준) — 높이가 달라도 겹치지 않도록 누적 계산
+    const order = d.rows.map((_, i) => i).filter(i => i !== d.from);
+    order.splice(to, 0, d.from);
+    const nt = [];
+    let y = d.geo[0].top;
+    order.forEach(i => { nt[i] = y; y += d.geo[i].h + d.gap; });
+    return nt;
+}
+function _pleShiftOthers(d) {
+    const nt = _pleLayoutFor(d, d.to);
+    d.rows.forEach((r, i) => {
+        if (i === d.from) return;
+        const shift = nt[i] - d.geo[i].top;
+        // 드래그 중인 곡에서 가까운 곡부터 차례로 움직이는 "물결" 효과 (최대 6단계)
+        r.style.transitionDelay = Math.min(Math.abs(i - d.from), 6) * 18 + 'ms';
+        r.style.transform = shift ? `translateY(${shift}px)` : '';
+    });
+}
+function _pleDragStart(row, y) {
+    const rows = _pleRows();
+    const from = rows.indexOf(row); if (from < 0) return false;
+    const sc = _pleScroller();
+    const geo = rows.map(r => ({ top: r.offsetTop, h: r.offsetHeight }));
+    const gap = rows.length > 1 ? Math.max(0, geo[1].top - (geo[0].top + geo[0].h)) : 0;
+    PLE.drag = { rows, geo, from, to: from, gap, sc, sy: y, s0: sc.get(), cy: y, raf: 0, ended: false, done: false };
+    rows.forEach(r => r.classList.add('ple-shift'));
+    row.classList.add('ple-dragging');
+    _pleDropMenu();                  // 이동 중에는 메뉴를 숨긴다 (놓으면 새 위치에서 다시 나타남)
+    _pleLockScroll(true);
+    _pleHaptic(8);
+    PLE.drag.raf = requestAnimationFrame(_pleDragFrame);
+    return true;
+}
+function _pleDragFrame() {
+    const d = PLE.drag; if (!d || d.ended) return;
+    const zoneT = 130, zoneB = innerHeight - 200;     // 상단(검색 캡슐) / 하단(미니 플레이어+내비) 자동 스크롤 영역
+    let v = 0;
+    if (d.cy < zoneT) v = -Math.min(16, (zoneT - d.cy) / zoneT * 22);
+    else if (d.cy > zoneB) v = Math.min(16, (d.cy - zoneB) / 200 * 22);
+    if (v) d.sc.by(v);
+    const dy = (d.cy + d.sc.get()) - (d.sy + d.s0);   // 손가락의 "문서 기준" 이동량 (자동 스크롤 포함)
+    const g = d.geo[d.from];
+    d.rows[d.from].style.transform = `translateY(${dy}px)`;
+    const center = g.top + dy + g.h / 2;
+    let to = 0;
+    for (let i = 0; i < d.rows.length; i++) {
+        if (i !== d.from && center > d.geo[i].top + d.geo[i].h / 2) to++;
+    }
+    if (to !== d.to) { d.to = to; _pleShiftOthers(d); _pleHaptic(5); }
+    d.raf = requestAnimationFrame(_pleDragFrame);
+}
+function _pleDragEnd() {
+    const d = PLE.drag; if (!d || d.ended) return;
+    d.ended = true; cancelAnimationFrame(d.raf);
+    const nt = _pleLayoutFor(d, d.to);
+    const row = d.rows[d.from];
+    row.classList.remove('ple-dragging');
+    row.classList.add('ple-settling');                 // 제자리 슬롯으로 부드럽게 안착
+    row.style.transitionDelay = '0ms';
+    row.style.transform = `translateY(${nt[d.from] - d.geo[d.from].top}px)`;
+    _pleKick(500);
+    setTimeout(() => {
+        if (d.done) return; d.done = true;
+        const pl = plById(PLE.plId);
+        if (pl && d.to !== d.from) {
+            const [mv] = pl.tracks.splice(d.from, 1);
+            pl.tracks.splice(d.to, 0, mv);
+            plSave();
+        }
+        PLE.drag = null;
+        _pleLockScroll(false);
+        if (PLE.on && PLE.plId) plRenderDetail(PLE.plId); else if (PL.curId) plRenderDetail(PL.curId);
+    }, 290);
+}
+function _pleAbortDrag() {
+    const d = PLE.drag; if (!d) return;
+    d.ended = true; d.done = true; cancelAnimationFrame(d.raf);
+    PLE.drag = null; _pleLockScroll(false);
+}
+
+/* ── 입력: 터치(WebView) + 마우스(브라우저) 공용 ── */
+function plEditInit() {
+    const list = document.getElementById('pl-track-list');
+    if (!list || list._pleInit) return;
+    list._pleInit = true;
+    let g = null;   // { row, sx, sy, mode: 'wait' | 'armed' | 'drag' }
+
+    function down(x, y, target) {
+        if (PLE.busy || PLE.drag || !target || !target.closest) return;
+        const row = target.closest('.pl-track');
+        if (!row || !list.contains(row)) return;
+        if (target.closest('.pl-track-del') || target.closest('#pl-edit-menu')) return;
+        g = { row, sx: x, sy: y, mode: 'wait' };
+        clearTimeout(PLE.lp);
+        if (PLE.on && row.dataset.id === PLE.id) { g.mode = 'armed'; return; }   // 이미 edit 중인 곡: 움직이면 바로 드래그
+        PLE.lp = setTimeout(() => {
+            if (!g || g.mode !== 'wait') return;
+            g.mode = 'armed'; g.long = true;
+            PLE.swallow = true;
+            plEditEnter(g.row);
+            _pleLockScroll(true);
+        }, PLE_LONG_MS);
+    }
+    function move(x, y) {
+        if (!g) return;
+        const dx = x - g.sx, dy = y - g.sy;
+        if (g.mode === 'wait') {
+            if (Math.hypot(dx, dy) > PLE_SLOP) { clearTimeout(PLE.lp); g = null; }   // 일반 스크롤
+        } else if (g.mode === 'armed') {
+            if (Math.abs(dy) > 4 && PLE.on) {
+                if (_pleDragStart(g.row, g.sy)) { g.mode = 'drag'; PLE.swallow = true; PLE.drag.cy = y; }
+                else g = null;
+            }
+        } else if (g.mode === 'drag' && PLE.drag) {
+            PLE.drag.cy = y;
+        }
+    }
+    function up() {
+        if (!g) return;
+        clearTimeout(PLE.lp);
+        const mode = g.mode, long = !!g.long; g = null;
+        if (mode === 'drag') _pleDragEnd();
+        else if (mode === 'armed') _pleLockScroll(false);
+        // 롱프레스/드래그 직후에 따라오는 click 만 차단 (이미 edit 중인 곡을 그냥 탭한 경우는 edit 종료로 이어지게 둔다)
+        if (mode === 'drag' || long) { PLE.swallow = true; setTimeout(() => { PLE.swallow = false; }, 380); }
+    }
+
+    list.addEventListener('touchstart', e => {
+        PLE.touchAt = Date.now();
+        if (e.touches.length !== 1) { up(); return; }
+        down(e.touches[0].clientX, e.touches[0].clientY, e.target);
+    }, { passive: true });
+    document.addEventListener('touchmove', e => { if (g && e.touches.length) move(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
+    document.addEventListener('touchend', () => up(), { passive: true });
+    document.addEventListener('touchcancel', () => up(), { passive: true });
+
+    list.addEventListener('mousedown', e => {
+        if (e.button !== 0 || Date.now() - PLE.touchAt < 700) return;   // 터치 직후의 호환 마우스 이벤트 무시
+        down(e.clientX, e.clientY, e.target);
+    });
+    window.addEventListener('mousemove', e => { if (g && Date.now() - PLE.touchAt >= 700) move(e.clientX, e.clientY); });
+    window.addEventListener('mouseup', () => { if (g && Date.now() - PLE.touchAt >= 700) up(); });
+
+    // 롱프레스/edit 중에는 WebView 기본 컨텍스트 메뉴(텍스트 선택·이미지 저장) 차단
+    list.addEventListener('contextmenu', e => {
+        if (g || PLE.on || PLE.drag || Date.now() - PLE.touchAt < 1500) e.preventDefault();
+    });
+}
+// edit 상태에서 곡 UI/메뉴 바깥을 탭하면 edit 종료 (곡 UI 탭은 위 row click 이 재생을 막고 여기서 종료)
+document.addEventListener('click', e => {
+    if (!PLE.on || PLE.swallow || PLE.drag) return;
+    if (e.target.closest && e.target.closest('#pl-edit-menu')) return;
+    plEditExit();
+});
+document.addEventListener('keydown', e => { if (e.code === 'Escape' && PLE.on) plEditExit(); });
+plEditInit();
+
 function plShowList() {
+    plEditExit();
     PL.curId = null;
     document.getElementById('pl-list-view').style.display = '';
     document.getElementById('pl-detail-view').style.display = 'none';
@@ -3807,6 +4118,7 @@ setTimeout(() => toast('✦ SYNC에 오신 걸 환영해요'), 1000);
    ANDROID INTEGRATION
 ════════════════════════════════════════════ */
 window.__onAndroidBack = function() {
+    if (PLE.on) { plEditExit(); return; }
     // 랜드스케이프 전체화면 모드면 먼저 해제
     if (NP_LS.active) { _exitNpLandscape(); return; }
     // Lyrics View가 열려 있으면 먼저 닫고 기본 화면으로 복귀
