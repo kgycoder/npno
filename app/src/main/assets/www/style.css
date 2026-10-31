@@ -5404,3 +5404,126 @@ html.bg-mode *, html.bg-mode *::before, html.bg-mode *::after {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
 }
+
+/* ════════════════════════════════════════════════════════
+   PLAYLIST TRACK EDIT MODE — 곡 길게 누르기 / 컨텍스트 메뉴 / 드래그 순서 변경
+   앱(glass-native)에서는 edit 타일·메뉴의 유리 표면을 네이티브(Kyant backdrop)가 그리고,
+   DOM 요소는 위치/상태/입력의 원천으로만 남겨 투명 처리한다. (브라우저 단독 실행 시 아래 폴백 스타일이 보인다.)
+════════════════════════════════════════════════════════ */
+#pl-track-list { position: relative; }
+
+.pl-track {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.pl-track > * { transition: opacity .17s ease; }
+
+/* 다른 곡들이 순차적으로 비켜나는 이동 (오버슈트 없는 감속 곡선 → 곡끼리 겹치지 않는다) */
+.pl-track.ple-shift {
+    transition: transform .34s cubic-bezier(.2, .9, .2, 1), background .12s;
+    will-change: transform;
+}
+
+.pl-track.ple-dragging {
+    transition: none !important;
+    position: relative;
+    z-index: 6;
+}
+
+.pl-track.ple-settling {
+    transition: transform .26s cubic-bezier(.2, .9, .2, 1) !important;
+    position: relative;
+    z-index: 6;
+}
+
+.pl-track.ple-removing {
+    transition: opacity .24s ease, transform .24s ease !important;
+    opacity: 0;
+    transform: scale(.96);
+    pointer-events: none;
+}
+
+.pl-track.editing {
+    position: relative;
+    z-index: 5;
+    touch-action: none;
+    background: rgba(255,255,255,.10);
+    border-color: rgba(255,255,255,.22);
+    box-shadow: 0 10px 28px rgba(0,0,0,.38);
+    -webkit-backdrop-filter: blur(22px) saturate(1.8);
+    backdrop-filter: blur(22px) saturate(1.8);
+}
+
+/* 드래그/롱프레스 중 문서 스크롤 잠금 (scrollTop 은 유지, 프로그램적 자동 스크롤은 가능) */
+html.ple-drag:not(.glass-native) #main { overflow: hidden !important; }
+html.ple-drag.glass-native { overflow-y: hidden !important; }
+
+/* edit 컨텍스트 메뉴 (폴백 DOM 스타일) */
+#pl-edit-menu {
+    position: absolute;
+    z-index: 7;
+    box-sizing: border-box;
+    padding: 7px 0;
+    border-radius: 28px;
+    background: rgba(18,18,18,.55);
+    border: 1px solid rgba(255,255,255,.20);
+    -webkit-backdrop-filter: blur(30px) saturate(1.8);
+    backdrop-filter: blur(30px) saturate(1.8);
+    box-shadow: 0 14px 34px rgba(0,0,0,.42);
+    opacity: 0;
+    transform: scale(.92);
+    transform-origin: top right;
+    transition: opacity .17s ease, transform .22s cubic-bezier(.2, .9, .2, 1);
+    pointer-events: none;
+}
+
+#pl-edit-menu.on {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+}
+
+.pl-edit-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    height: 48px;
+    padding: 0 20px;
+    font-size: 15px;
+    font-weight: 500;
+    color: #fff;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+    .pl-edit-item.danger { color: #ff453a; }
+    .pl-edit-item.on { color: var(--acc); }
+    .pl-edit-item:active { background: rgba(255,255,255,.08); }
+
+/* ── 앱(glass-native): 유리 표면은 네이티브 Compose 가 그린다 → DOM 은 투명 처리 ── */
+html.glass-native .pl-track.editing {
+    background: none !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+html.glass-native .pl-track.editing > * { opacity: 0 !important; }
+
+html.glass-native #pl-edit-menu {
+    opacity: 0 !important;
+    background: none !important;
+    box-shadow: none !important;
+    border-color: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    transition: none !important;
+}
