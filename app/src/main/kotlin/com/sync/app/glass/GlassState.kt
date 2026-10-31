@@ -34,6 +34,14 @@ data class CssRect(val x: Float, val y: Float, val w: Float, val h: Float)
     val focused: Boolean, val hint: String?, val rows: List<AddRow>
 )
 
+/** 플레이리스트 곡 edit 상태. rect 들은 "문서 기준" CSS px (y = viewport y + scrollY) — 네이티브가 스크롤을 직접 보정한다. */
+@Immutable data class EditItem(val kind: String, val label: String, val on: Boolean)
+@Immutable data class EditMenuState(val rect: CssRect, val items: List<EditItem>)
+@Immutable data class EditState(
+    val rect: CssRect, val art: String, val title: String, val channel: String, val dur: String,
+    val dragging: Boolean, val menu: EditMenuState?
+)
+
 @Immutable
 data class GlassState(
     val accent: Long = 0xFFFA2D5AL,
@@ -43,7 +51,8 @@ data class GlassState(
     val ctx: CtxState? = null,
     val dialog: DialogState? = null,
     val confirm: ConfirmState? = null,
-    val add: AddModalState? = null
+    val add: AddModalState? = null,
+    val edit: EditState? = null
 ) {
     companion object {
         fun parse(json: String): GlassState {
@@ -70,6 +79,21 @@ data class GlassState(
                 confirm = o.optJSONObject("cfm")?.let {
                     ConfirmState(rect(it), it.optString("title"), it.optString("msg"),
                         it.optString("ok"), it.optString("cancel"))
+                },
+                edit = o.optJSONObject("edit")?.let { e ->
+                    EditState(
+                        rect(e), e.optString("art"), e.optString("t"), e.optString("c"), e.optString("d"),
+                        e.optBoolean("drag"),
+                        e.optJSONObject("menu")?.let { m ->
+                            val arr = m.optJSONArray("items")
+                            EditMenuState(rect(m), buildList {
+                                if (arr != null) for (i in 0 until arr.length()) {
+                                    val item = arr.getJSONObject(i)
+                                    add(EditItem(item.optString("k"), item.optString("l"), item.optBoolean("on")))
+                                }
+                            })
+                        }
+                    )
                 },
                 add = o.optJSONObject("add")?.let { a ->
                     val rows = a.optJSONArray("rows")
